@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Gradescope Grading Helper
 // @namespace    http://tampermonkey.net/
-// @version      2.1
+// @version      2.5
 // @description  Reorders/expands submission files and shows a checklist: format, filename, and copied-description detection.
 // @author       You
 // @match        https://www.gradescope.com/courses/*/questions/*/submissions/*
@@ -29,6 +29,18 @@
       url: 'https://purdue-ebec.github.io/entry-2026-autumn/Python/02/exercises/4/time_calculator/instructions.html',
       stem: 'time_calculator',
     },
+    '73756612': {
+      url: 'https://purdue-ebec.github.io/entry-2026-autumn/Python/04/exercises/4/prime_numbers/instructions.html',
+      stem: 'prime_numbers'
+    },
+    '73756656': {
+      url: 'https://purdue-ebec.github.io/entry-2026-autumn/Python/06/exercises/4/spiral/instructions.html',
+      stem: 'spiral'
+    },
+    '73756626': {
+      url: 'https://purdue-ebec.github.io/entry-2026-autumn/Python/08/exercises/5/number_reader/instructions.html',
+      stem: 'number_reader'
+    }
   };
 
   const NGRAM = 4; // phrase length for copy detection
@@ -77,10 +89,25 @@
         url,
         onload: r => {
           const doc = new DOMParser().parseFromString(r.responseText, 'text/html');
-          // The description is the <p>s directly under the page's top-level section
-          const sec = doc.querySelector('section h1')?.closest('section');
-          const paras = sec ? Array.from(sec.children).filter(e => e.tagName === 'P') : [];
-          descCache[url] = paras.map(p => p.textContent).join(' ').trim();
+          // The description is the intro: every <p>/<li> after the <h1> (in document
+          // order, at any nesting depth) up to the next heading ("Sample Output", etc.).
+          // The page may have several <h1>s (site logo, search dialog, ...), so try
+          // each one and keep the longest intro.
+          const nodes = Array.from(doc.querySelectorAll('h1, h2, h3, h4, h5, h6, p, li'));
+          const h1s = nodes.filter(el => el.tagName === 'H1');
+          let best = '';
+          for (const h1 of h1s) {
+            const intro = [];
+            for (const el of nodes.slice(nodes.indexOf(h1) + 1)) {
+              if (/^H[1-6]$/.test(el.tagName)) break;
+              intro.push(el.textContent);
+            }
+            const text = intro.join(' ').replace(/\s+/g, ' ').trim();
+            if (text.length > best.length) best = text;
+          }
+          console.log('[GradescopeHelper] h1s:', h1s.map(h => h.textContent.trim()),
+                      '| description:', best);
+          descCache[url] = best;
           resolve(descCache[url]);
         },
         onerror: reject,
@@ -94,7 +121,12 @@
     if (link) {
       try {
         const res = await fetch(link.href, { credentials: 'include' });
-        if (res.ok) return await res.text();
+        if (res.ok) {
+          const text = await res.text();
+          const type = res.headers.get('content-type') || '';
+          // Ignore HTML pages (e.g. a viewer/redirect page instead of the raw file)
+          if (!type.includes('html') && !/^\s*</.test(text)) return text;
+        }
       } catch (_) { /* fall through */ }
     }
     return section.innerText; // may include line numbers; fine for # comments
@@ -136,7 +168,7 @@
       el = document.createElement('div');
       el.id = 'gs-helper-panel';
       el.style.cssText = [
-        'position:fixed', 'bottom:12px', 'left:12px', 'z-index:99999',
+        'position:fixed', 'top:12px', 'left:12px', 'z-index:99999',
         'background:#fff', 'border:1px solid #ccc', 'border-radius:8px',
         'padding:8px 12px', 'font:13px/1.5 system-ui,sans-serif',
         'box-shadow:0 2px 8px rgba(0,0,0,.2)', 'max-width:320px',
@@ -177,7 +209,9 @@
       try {
         const [desc, src] = await Promise.all([fetchDescription(cfg.url), getSource(pySections[0])]);
         const comments = extractComments(src);
-        if (!words(comments).length) {
+        if (!words(desc).length) {
+          checks.push({ status: 'info', text: 'Description scrape returned nothing — check selector' });
+        } else if (!words(comments).length) {
           checks.push({ status: 'fail', text: 'No comments/docstrings found' });
         } else {
           const score = copyScore(desc, comments);
@@ -198,6 +232,19 @@
   // ---------------------------------------------------------------------------
   // Main
   // ---------------------------------------------------------------------------
+  // Gradescope swaps submissions without a page load, so whichever container
+  // scrolls keeps its position. Reset the window and every scrolled ancestor
+  // of the file viewers.
+  function scrollToTop() {
+    window.scrollTo(0, 0);
+    if (document.scrollingElement) document.scrollingElement.scrollTop = 0;
+    let el = document.querySelector('section.fileViewer');
+    while (el) {
+      if (el.scrollTop) el.scrollTop = 0;
+      el = el.parentElement;
+    }
+  }
+
   function processFiles() {
     const sections = Array.from(document.querySelectorAll('section.fileViewer'));
     if (!sections.length) return false;
@@ -211,6 +258,7 @@
       setExpanded(s, EXPAND_EXTS.some(e => filename.endsWith(e)));
     });
 
+    scrollToTop(); // after reordering/expanding, which can shift the scroll position
     console.log('[GradescopeHelper] Processed', sections.length, 'files:', sections.map(getFilename));
     runChecks(sections);
     return true;
@@ -231,6 +279,7 @@
     if (location.href !== lastUrl) {
       lastUrl = location.href;
       ran = false;
+      scrollToTop();
     }
     tryRun();
   });
